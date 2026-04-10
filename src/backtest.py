@@ -40,7 +40,7 @@ def run_backtest(
 
     df_4h = resample_ohlcv(df_1h, "4H")
     df_daily = resample_ohlcv(df_1h, "1D")
-    df = add_features(df_4h, df_daily).dropna().copy()
+    df = add_features(df_4h, df_daily, cfg).dropna().copy()
 
     equity = starting_equity
     position: Position | None = None
@@ -108,7 +108,7 @@ def run_backtest(
                     equity += pnl - fee
                     position.remaining_qty -= qty
                     position.tp2_done = True
-                    trail = row["ema20"] - 0.5 * row["atr14"]
+                    trail = row["ema20"] - cfg.trailing_atr_mult * row["atr14"]
                     position.stop_price = max(position.stop_price, trail)
                     r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
                     trades.append({"timestamp": ts, "event_type": "tp2", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
@@ -124,7 +124,7 @@ def run_backtest(
                     position = None
 
         if position is None and not monthly.entries_disabled:
-            if is_breakout_entry(row) or is_pullback_entry(row):
+            if is_breakout_entry(row, cfg) or is_pullback_entry(row, cfg):
                 entry_price = _entry_fill(row["close"], cfg.slippage_rate)
                 stop_dist = cfg.stop_atr_mult * row["atr14"]
                 qty = compute_position_size(
