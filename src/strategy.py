@@ -22,6 +22,10 @@ class StrategyConfig:
     pullback_rsi_min: float = 48.0
     pullback_rsi_max: float = 62.0
     trailing_atr_mult: float = 0.5
+    monthly_min_return_pct: float = 0.10  # Minimum 10% monthly return target
+    scale_up_threshold: float = 0.08  # Scale up position size at 8%
+    scale_down_threshold: float = 0.12  # Scale down at 12%
+    loss_stop_threshold: float = -0.04  # Stop entries at -4% monthly loss
 
 
 @dataclass
@@ -46,6 +50,8 @@ class MonthlyState:
     start_equity: float | None = None
     size_multiplier: float = 1.0
     entries_disabled: bool = False
+    monthly_return_pct: float = 0.0
+    target_met: bool = False
 
 
 def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyConfig | None = None) -> pd.DataFrame:
