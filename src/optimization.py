@@ -147,3 +147,97 @@ def run_parameter_sweep(
     oos_df.to_csv(out_dir / "optimization_top3_oos.csv", index=False)
 
     return results_df, oos_df
+
+
+def build_optimization_summary(
+    baseline_metrics: dict[str, float],
+    results_df: pd.DataFrame,
+    oos_df: pd.DataFrame,
+    output_dir: str | Path = "outputs",
+    train_ratio: float = 0.7,
+) -> Path:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "optimization_summary.md"
+
+    top10 = results_df.head(10)
+
+    best_monthly_row = top10.sort_values("train_average_monthly_return_pct", ascending=False).iloc[0].to_dict()
+
+    if oos_df.empty:
+        best_tradeoff_row = {}
+    else:
+        ranked = oos_df.copy()
+        ranked["tradeoff_score"] = (
+            ranked["validation_average_monthly_return_pct"] * 3.0
+            - ranked["validation_max_drawdown_pct"].abs() * 1.2
+        )
+        best_tradeoff_row = ranked.sort_values("tradeoff_score", ascending=False).iloc[0].to_dict()
+
+    lines: list[str] = []
+    lines.append("# Optimization Summary")
+    lines.append("")
+    lines.append("## Baseline metrics (current reproducible run)")
+    for k, v in baseline_metrics.items():
+        lines.append(f"- {k}: {v}")
+    lines.append("")
+    lines.append("## Method and anti-overfitting assumptions")
+    lines.append(
+        f"- Data is split chronologically into train/validation using train_ratio={train_ratio:.2f}; "
+        "no shuffling is used."
+    )
+    lines.append("- Parameter sweep rankings are based on train metrics only, then validated out-of-sample on the top 3.")
+    lines.append("- Balanced score rewards average monthly return, penalizes drawdown, and enforces PF/trade-count quality gates.")
+    lines.append("- Validation is used for selection sanity-checks rather than repeated retuning.")
+    lines.append("")
+    lines.append("## Top 10 train-ranked parameter sets")
+    lines.append(f"- Saved to `{(out_dir / 'optimization_top10.csv').as_posix()}`.")
+    lines.append("- Full grid results saved to `outputs/optimization_results.csv`.")
+    lines.append("")
+    lines.append("## Out-of-sample validation (top 3)")
+    lines.append(f"- Saved to `{(out_dir / 'optimization_top3_oos.csv').as_posix()}`.")
+    lines.append("")
+    lines.append("## Best return/drawdown tradeoff set (from OOS top 3)")
+    if best_tradeoff_row:
+        lines.append(
+            "- Validation rank "
+            f"{int(best_tradeoff_row['validation_rank'])}: "
+            f"avg_monthly={best_tradeoff_row['validation_average_monthly_return_pct']:.2f}%, "
+            f"max_drawdown={best_tradeoff_row['validation_max_drawdown_pct']:.2f}%, "
+            f"profit_factor={best_tradeoff_row['validation_profit_factor']:.2f}, "
+            f"trades={int(best_tradeoff_row['validation_total_trades'])}"
+        )
+        lines.append(
+            "- Parameters: "
+            f"risk_pct={best_tradeoff_row['risk_pct']}, stop_atr_mult={best_tradeoff_row['stop_atr_mult']}, "
+            f"tp=({best_tradeoff_row['tp1_r']}, {best_tradeoff_row['tp2_r']}, {best_tradeoff_row['tp3_r']}), "
+            f"adx_threshold={best_tradeoff_row['adx_threshold']}, "
+            f"breakout_lookback={int(best_tradeoff_row['breakout_lookback'])}, "
+            f"pullback_rsi=[{best_tradeoff_row['pullback_rsi_min']}, {best_tradeoff_row['pullback_rsi_max']}], "
+            f"trailing_atr_mult={best_tradeoff_row['trailing_atr_mult']}"
+        )
+    else:
+        lines.append("- No validation rows available.")
+    lines.append("")
+    lines.append("## Set with strongest average monthly return improvement (train top 10)")
+    lines.append(
+        f"- avg_monthly={best_monthly_row['train_average_monthly_return_pct']:.2f}% "
+        f"(baseline {baseline_metrics.get('average_monthly_return_pct', 0.0):.2f}%)."
+    )
+    lines.append(
+        "- Parameters: "
+        f"risk_pct={best_monthly_row['risk_pct']}, stop_atr_mult={best_monthly_row['stop_atr_mult']}, "
+        f"tp=({best_monthly_row['tp1_r']}, {best_monthly_row['tp2_r']}, {best_monthly_row['tp3_r']}), "
+        f"adx_threshold={best_monthly_row['adx_threshold']}, "
+        f"breakout_lookback={int(best_monthly_row['breakout_lookback'])}, "
+        f"pullback_rsi=[{best_monthly_row['pullback_rsi_min']}, {best_monthly_row['pullback_rsi_max']}], "
+        f"trailing_atr_mult={best_monthly_row['trailing_atr_mult']}"
+    )
+    lines.append("")
+    lines.append("## Caution")
+    lines.append(
+        "- Before deployment, run walk-forward testing across multiple market regimes to reduce single-split bias."
+    )
+
+    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return summary_path
