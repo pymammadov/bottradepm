@@ -1,0 +1,1 @@
+"""BTC strategy research package."""
