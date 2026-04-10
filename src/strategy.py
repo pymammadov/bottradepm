@@ -17,6 +17,11 @@ class StrategyConfig:
     tp1_r: float = 1.2
     tp2_r: float = 2.2
     tp3_r: float = 4.0
+    adx_threshold: float = 18.0
+    breakout_lookback: int = 20
+    pullback_rsi_min: float = 48.0
+    pullback_rsi_max: float = 62.0
+    trailing_atr_mult: float = 0.5
 
 
 @dataclass
@@ -43,13 +48,14 @@ class MonthlyState:
     entries_disabled: bool = False
 
 
-def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame) -> pd.DataFrame:
+def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyConfig | None = None) -> pd.DataFrame:
+    cfg = config or StrategyConfig()
     out = df_4h.copy()
     out["ema20"] = ema(out["close"], 20)
     out["ema50"] = ema(out["close"], 50)
     out["atr14"] = atr(out, 14)
     out["rsi14"] = rsi(out["close"], 14)
-    out["prior_20_high"] = out["high"].rolling(20).max().shift(1)
+    out["prior_lookback_high"] = out["high"].rolling(cfg.breakout_lookback).max().shift(1)
     out["vol_ma20"] = out["volume"].rolling(20).mean()
 
     d = df_daily.copy()
@@ -59,7 +65,7 @@ def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame) -> pd.DataFrame:
     d["daily_regime"] = (
         (d["close"] > d["d_ema200"])
         & (d["d_ema50"] > d["d_ema200"])
-        & (d["d_adx14"] > 18)
+        & (d["d_adx14"] > cfg.adx_threshold)
     ).shift(1)
 
     cols = d[["daily_regime", "d_ema50", "d_ema200", "d_adx14"]]
@@ -84,18 +90,20 @@ def compute_position_size(
     return max(0.0, min(raw_qty, cap_qty))
 
 
-def is_breakout_entry(row: pd.Series) -> bool:
+def is_breakout_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
+    _ = config or StrategyConfig()
     return bool(
         row["daily_regime"]
-        and row["close"] > row["prior_20_high"]
+        and row["close"] > row["prior_lookback_high"]
         and row["volume"] > 1.5 * row["vol_ma20"]
         and row["close"] > row["ema20"]
         and row["close"] > row["ema50"]
     )
 
 
-def is_pullback_entry(row: pd.Series) -> bool:
+def is_pullback_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
+    cfg = config or StrategyConfig()
     touch_ema = (row["low"] <= row["ema20"] <= row["close"]) or (row["low"] <= row["ema50"] <= row["close"])
     bullish = row["close"] > row["open"]
-    rsi_ok = 48 <= row["rsi14"] <= 62
+    rsi_ok = cfg.pullback_rsi_min <= row["rsi14"] <= cfg.pullback_rsi_max
     return bool(row["daily_regime"] and touch_ema and bullish and rsi_ok and row["close"] > row["ema50"])

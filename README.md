@@ -78,6 +78,18 @@ Outputs:
 - `outputs/report.json`
 - `outputs/equity_curve.png`
 
+
+## Run optimization sweep (train/validation)
+
+```bash
+python scripts/run_optimization.py --csv data/btcusdt_1h.csv --train-ratio 0.7
+```
+
+Optimization outputs:
+- `outputs/optimization_results.csv`
+- `outputs/optimization_top10.csv`
+- `outputs/optimization_top3_oos.csv`
+
 ## Report fields
 
 - starting equity
