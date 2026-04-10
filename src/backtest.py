@@ -56,12 +56,19 @@ def run_backtest(
             monthly.start_equity = equity
             monthly.size_multiplier = 1.0
             monthly.entries_disabled = False
+            monthly.monthly_return_pct = 0.0
+            monthly.target_met = False
 
         if monthly.start_equity and monthly.start_equity > 0:
             month_ret = (equity / monthly.start_equity) - 1
-            if month_ret >= 0.10:
-                monthly.size_multiplier = 0.5
-            if month_ret <= -0.04:
+            monthly.monthly_return_pct = month_ret
+
+            if month_ret >= cfg.monthly_min_return_pct:
+                monthly.target_met = True
+                monthly.size_multiplier = max(0.3, monthly.size_multiplier - 0.1)
+            elif month_ret >= cfg.scale_up_threshold:
+                monthly.size_multiplier = min(1.5, monthly.size_multiplier + 0.15)
+            elif month_ret <= cfg.loss_stop_threshold:
                 monthly.entries_disabled = True
 
         if position is not None:
@@ -195,6 +202,7 @@ def run_backtest(
         equity_curve=equity_df,
         forced_close_count=forced_close_count,
         data_source=data_source,
+        monthly_min_target_pct=cfg.monthly_min_return_pct * 100,
     )
 
     trades_df.to_csv(out_dir / "trades.csv", index=False)
