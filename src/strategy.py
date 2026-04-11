@@ -9,6 +9,7 @@ from .indicators import adx, atr, ema, rsi
 
 @dataclass
 class StrategyConfig:
+    strategy_family: str = "baseline"  # baseline|v2
     risk_pct: float = 0.0075
     max_leverage: float = 2.0
     stop_atr_mult: float = 1.8
@@ -38,6 +39,17 @@ class StrategyConfig:
     enable_short: bool = False
     short_entry_mode: str = "breakdown"  # breakdown|pullback|combined
     volatility_filter_quantile: float = 0.6
+    v2_regime_mode: str = "hybrid"  # breakout|pullback|hybrid
+    v2_vol_stop_floor: float = 1.1
+    v2_vol_stop_ceiling: float = 2.6
+    v2_tp1_size: float = 0.2
+    v2_tp2_size: float = 0.2
+    v2_tp1_r: float = 1.6
+    v2_tp2_r: float = 3.2
+    v2_tp3_r: float = 7.0
+    v2_trail_activation_r: float = 2.4
+    v2_trail_swing_lookback: int = 6
+    v2_reentry_bars: int = 6
 
 
 @dataclass
@@ -101,8 +113,10 @@ def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyCo
     out["d_adx14"] = out["d_adx14"].fillna(0.0)
     out["daily_regime"] = out["daily_regime"].astype("boolean").fillna(False).astype(bool)
     out["daily_bear_regime"] = ((out["close"] < out["d_ema200"]) & (out["d_adx14"] > cfg.adx_threshold)).fillna(False)
+    out["daily_sideways_regime"] = (~out["daily_regime"] & ~out["daily_bear_regime"]).fillna(False)
     vol_thresh = out["volatility_20"].quantile(cfg.volatility_filter_quantile)
     out["high_vol_regime"] = (out["volatility_20"] >= vol_thresh).fillna(False)
+    out["low_vol_regime"] = (out["volatility_20"] < vol_thresh).fillna(False)
     return out
 
 

@@ -11,6 +11,7 @@ from src.strategy import StrategyConfig
 
 
 OPTIMIZATION_PARAM_KEYS = [
+    "strategy_family",
     "risk_pct",
     "stop_atr_mult",
     "adx_threshold",
@@ -30,6 +31,19 @@ OPTIMIZATION_PARAM_KEYS = [
     "move_stop_to_breakeven_after_tp1",
     "use_monthly_controls",
     "use_regime_filter",
+    "enable_short",
+    "short_entry_mode",
+    "v2_regime_mode",
+    "v2_vol_stop_floor",
+    "v2_vol_stop_ceiling",
+    "v2_tp1_size",
+    "v2_tp2_size",
+    "v2_tp1_r",
+    "v2_tp2_r",
+    "v2_tp3_r",
+    "v2_trail_activation_r",
+    "v2_trail_swing_lookback",
+    "v2_reentry_bars",
 ]
 
 
@@ -88,6 +102,7 @@ def _config_grid() -> list[dict]:
     rows: list[dict] = []
     report_keys: list[str] | None = None
     rsi_ranges = [(44.0, 64.0), (46.0, 62.0), (48.0, 60.0)]
+    baseline_rows = []
     for (
         risk_pct,
         stop_atr_mult,
@@ -123,8 +138,9 @@ def _config_grid() -> list[dict]:
     ):
         pullback_rsi_min, pullback_rsi_max = rsi_range
         tp1_size, tp2_size = tp_split
-        rows.append(
+        baseline_rows.append(
             {
+                "strategy_family": "baseline",
                 "risk_pct": risk_pct,
                 "stop_atr_mult": stop_atr_mult,
                 "adx_threshold": adx_threshold,
@@ -144,6 +160,84 @@ def _config_grid() -> list[dict]:
                 "move_stop_to_breakeven_after_tp1": move_be,
                 "use_monthly_controls": use_monthly_controls,
                 "use_regime_filter": use_regime_filter,
+                "enable_short": False,
+                "short_entry_mode": "breakdown",
+                "v2_regime_mode": "hybrid",
+                "v2_vol_stop_floor": 1.1,
+                "v2_vol_stop_ceiling": 2.6,
+                "v2_tp1_size": 0.2,
+                "v2_tp2_size": 0.2,
+                "v2_tp1_r": 1.6,
+                "v2_tp2_r": 3.2,
+                "v2_tp3_r": 7.0,
+                "v2_trail_activation_r": 2.4,
+                "v2_trail_swing_lookback": 6,
+                "v2_reentry_bars": 6,
+            }
+        )
+    rows.extend(baseline_rows[:18])
+    for (
+        risk_pct,
+        stop_atr_mult,
+        adx_threshold,
+        breakout_lookback,
+        entry_mode,
+        short_mode,
+        v2_mode,
+        stop_floor,
+        stop_ceiling,
+        trail_activation,
+        trail_lb,
+        reentry_bars,
+    ) in product(
+        [0.006, 0.008, 0.010],
+        [1.5, 1.8, 2.1],
+        [18.0, 22.0],
+        [15, 24],
+        ["combined", "breakout", "pullback"],
+        ["combined", "breakdown", "pullback"],
+        ["hybrid", "breakout", "pullback"],
+        [1.0, 1.2],
+        [2.4, 2.8],
+        [2.0, 2.8, 3.6],
+        [5, 8],
+        [4, 8],
+    ):
+        rows.append(
+            {
+                "strategy_family": "v2",
+                "risk_pct": risk_pct,
+                "stop_atr_mult": stop_atr_mult,
+                "adx_threshold": adx_threshold,
+                "breakout_lookback": breakout_lookback,
+                "pullback_rsi_min": 46.0,
+                "pullback_rsi_max": 62.0,
+                "trailing_atr_mult": 0.5,
+                "tp1_r": 1.2,
+                "tp2_r": 2.2,
+                "tp3_r": 4.0,
+                "entry_mode": entry_mode,
+                "breakout_volume_mult": 1.2,
+                "breakout_close_buffer_atr": 0.1,
+                "reentry_cooldown_bars": 0,
+                "tp1_size": 0.4,
+                "tp2_size": 0.3,
+                "move_stop_to_breakeven_after_tp1": False,
+                "use_monthly_controls": False,
+                "use_regime_filter": True,
+                "enable_short": True,
+                "short_entry_mode": short_mode,
+                "v2_regime_mode": v2_mode,
+                "v2_vol_stop_floor": stop_floor,
+                "v2_vol_stop_ceiling": stop_ceiling,
+                "v2_tp1_size": 0.15,
+                "v2_tp2_size": 0.2,
+                "v2_tp1_r": 1.8,
+                "v2_tp2_r": 3.8,
+                "v2_tp3_r": 8.0,
+                "v2_trail_activation_r": trail_activation,
+                "v2_trail_swing_lookback": trail_lb,
+                "v2_reentry_bars": reentry_bars,
             }
         )
     max_grid_size = 60
@@ -157,9 +251,9 @@ def _extract_config(row: pd.Series) -> dict:
     cfg = {}
     for key in OPTIMIZATION_PARAM_KEYS:
         value = row[key]
-        if key in {"breakout_lookback", "reentry_cooldown_bars"}:
+        if key in {"breakout_lookback", "reentry_cooldown_bars", "v2_trail_swing_lookback", "v2_reentry_bars"}:
             cfg[key] = int(value)
-        elif key in {"move_stop_to_breakeven_after_tp1", "use_monthly_controls", "use_regime_filter"}:
+        elif key in {"move_stop_to_breakeven_after_tp1", "use_monthly_controls", "use_regime_filter", "enable_short"}:
             cfg[key] = bool(value)
         else:
             cfg[key] = value
