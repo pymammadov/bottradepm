@@ -28,6 +28,13 @@ def _pick_best_oos(oos_df):
     return _to_serializable(oos_df.iloc[0].to_dict())
 
 
+def _split_train_val_oos(df, train_ratio: float = 0.6, val_ratio: float = 0.2):
+    n = len(df)
+    i1 = int(n * train_ratio)
+    i2 = int(n * (train_ratio + val_ratio))
+    return df.iloc[:i1].copy(), df.iloc[i1:i2].copy(), df.iloc[i2:].copy()
+
+
 def main() -> None:
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -43,12 +50,31 @@ def main() -> None:
 
     df = load_ohlcv_csv(args.csv)
 
-    baseline_report = run_backtest(
-        df_1h=df,
+    train_df, validation_df, oos_segment = _split_train_val_oos(df, train_ratio=0.6, val_ratio=0.2)
+
+    baseline_train = run_backtest(
+        df_1h=train_df,
         config=StrategyConfig(),
         starting_equity=args.starting_equity,
-        output_dir=out_dir,
-        data_source="baseline_full",
+        output_dir=out_dir / "baseline_train",
+        data_source="baseline_train",
+        save_plot=False,
+    )
+    baseline_validation = run_backtest(
+        df_1h=validation_df,
+        config=StrategyConfig(),
+        starting_equity=args.starting_equity,
+        output_dir=out_dir / "baseline_validation",
+        data_source="baseline_validation",
+        save_plot=False,
+    )
+    baseline_oos = run_backtest(
+        df_1h=oos_segment,
+        config=StrategyConfig(),
+        starting_equity=args.starting_equity,
+        output_dir=out_dir / "baseline_oos",
+        data_source="baseline_oos",
+        save_plot=False,
     )
 
     results_df, oos_df, meta = run_parameter_sweep(
@@ -61,8 +87,18 @@ def main() -> None:
     best_oos = _pick_best_oos(oos_df)
     selected_params = {k: best_oos[k] for k in OPTIMIZATION_PARAM_KEYS} if best_oos else {}
 
+    best_family = selected_params.get("strategy_family", "baseline")
+    best_cfg = StrategyConfig(**selected_params) if selected_params else StrategyConfig()
+    best_train = run_backtest(train_df, config=best_cfg, starting_equity=args.starting_equity, output_dir=out_dir / "best_train", data_source="best_train", save_plot=False)
+    best_validation = run_backtest(validation_df, config=best_cfg, starting_equity=args.starting_equity, output_dir=out_dir / "best_validation", data_source="best_validation", save_plot=False)
+    best_oos_report = run_backtest(oos_segment, config=best_cfg, starting_equity=args.starting_equity, output_dir=out_dir / "best_oos", data_source="best_oos", save_plot=False)
+
     summary = {
-        "baseline_metrics": baseline_report,
+        "baseline_metrics": {
+            "train": baseline_train,
+            "validation": baseline_validation,
+            "oos": baseline_oos,
+        },
         "train_validation_ranges": {
             "train_start": meta["train_start"],
             "train_end": meta["train_end"],
@@ -78,30 +114,67 @@ def main() -> None:
         "top_10_train_configs": [_to_serializable(r) for r in results_df.head(10).to_dict(orient="records")],
         "top_3_oos_configs": [_to_serializable(r) for r in oos_df.head(3).to_dict(orient="records")],
         "selected_best_config": {
+            "family": best_family,
             "parameters": selected_params,
             "train_metrics": {k.replace("train_", ""): best_oos[k] for k in best_oos if k.startswith("train_")} if best_oos else {},
             "oos_metrics": {k.replace("validation_", ""): best_oos[k] for k in best_oos if k.startswith("validation_")} if best_oos else {},
             "reason": "Selected by highest OOS score balancing monthly return, PF, drawdown, trade count, and train-validation robustness.",
         },
-    }
-
-    (out_dir / "optimization_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-
-    best_report = {
-        "best_model": summary["selected_best_config"],
-        "comparison_vs_baseline": {
-            "baseline_average_monthly_return_pct": baseline_report.get("average_monthly_return_pct"),
-            "best_train_average_monthly_return_pct": summary["selected_best_config"]["train_metrics"].get("average_monthly_return_pct"),
-            "best_oos_average_monthly_return_pct": summary["selected_best_config"]["oos_metrics"].get("average_monthly_return_pct"),
-            "baseline_profit_factor": baseline_report.get("profit_factor"),
-            "best_oos_profit_factor": summary["selected_best_config"]["oos_metrics"].get("profit_factor"),
-            "baseline_max_drawdown_pct": baseline_report.get("max_drawdown_pct"),
-            "best_oos_max_drawdown_pct": summary["selected_best_config"]["oos_metrics"].get("max_drawdown_pct"),
+        "baseline_vs_best": {
+            "train": {
+                "baseline_average_monthly_return_pct": baseline_train.get("average_monthly_return_pct"),
+                "best_average_monthly_return_pct": best_train.get("average_monthly_return_pct"),
+                "baseline_profit_factor": baseline_train.get("profit_factor"),
+                "best_profit_factor": best_train.get("profit_factor"),
+                "baseline_max_drawdown_pct": baseline_train.get("max_drawdown_pct"),
+                "best_max_drawdown_pct": best_train.get("max_drawdown_pct"),
+            },
+            "validation": {
+                "baseline_average_monthly_return_pct": baseline_validation.get("average_monthly_return_pct"),
+                "best_average_monthly_return_pct": best_validation.get("average_monthly_return_pct"),
+                "baseline_profit_factor": baseline_validation.get("profit_factor"),
+                "best_profit_factor": best_validation.get("profit_factor"),
+                "baseline_max_drawdown_pct": baseline_validation.get("max_drawdown_pct"),
+                "best_max_drawdown_pct": best_validation.get("max_drawdown_pct"),
+            },
+            "oos": {
+                "baseline_average_monthly_return_pct": baseline_oos.get("average_monthly_return_pct"),
+                "best_average_monthly_return_pct": best_oos_report.get("average_monthly_return_pct"),
+                "baseline_profit_factor": baseline_oos.get("profit_factor"),
+                "best_profit_factor": best_oos_report.get("profit_factor"),
+                "baseline_max_drawdown_pct": baseline_oos.get("max_drawdown_pct"),
+                "best_max_drawdown_pct": best_oos_report.get("max_drawdown_pct"),
+            },
         },
     }
-    (out_dir / "best_model_report.json").write_text(json.dumps(best_report, indent=2, default=str), encoding="utf-8")
 
-    print(json.dumps({"summary": str(out_dir / "optimization_summary.json"), "best": str(out_dir / "best_model_report.json")}, indent=2))
+    results_df.to_csv(out_dir / "strategy_v2_optimization_results.csv", index=False)
+    (out_dir / "strategy_v2_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+
+    beats_train = best_train.get("average_monthly_return_pct", -999) > baseline_train.get("average_monthly_return_pct", 999)
+    beats_val = best_validation.get("average_monthly_return_pct", -999) > baseline_validation.get("average_monthly_return_pct", 999)
+    beats_oos = best_oos_report.get("average_monthly_return_pct", -999) > baseline_oos.get("average_monthly_return_pct", 999)
+    improvement_log = [
+        "# Strategy V2 Improvement Log",
+        "",
+        f"- Best selected family: **{best_family}**.",
+        f"- Train improvement vs baseline (avg monthly return): {'YES' if beats_train else 'NO'}.",
+        f"- Validation improvement vs baseline (avg monthly return): {'YES' if beats_val else 'NO'}.",
+        f"- OOS improvement vs baseline (avg monthly return): {'YES' if beats_oos else 'NO'}.",
+        "- Strategy V2 includes optional short-side trading, regime-aware switching, volatility-aware stops, delayed profit-taking, and continuation re-entry.",
+    ]
+    (out_dir / "strategy_v2_improvement_log.md").write_text("\n".join(improvement_log) + "\n", encoding="utf-8")
+
+    print(
+        json.dumps(
+            {
+                "results": str(out_dir / "strategy_v2_optimization_results.csv"),
+                "summary": str(out_dir / "strategy_v2_summary.json"),
+                "improvement_log": str(out_dir / "strategy_v2_improvement_log.md"),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

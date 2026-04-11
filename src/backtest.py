@@ -69,6 +69,8 @@ def run_backtest(
     monthly = MonthlyState()
     forced_close_count = 0
     cooldown_bars = 0
+    reentry_bias_side = 0
+    reentry_bars_left = 0
 
     for ts, row in df.iterrows():
         current_month = ts.strftime("%Y-%m")
@@ -119,9 +121,12 @@ def run_backtest(
                 })
                 position = None
                 cooldown_bars = cfg.reentry_cooldown_bars
+                reentry_bias_side = 0
+                reentry_bars_left = 0
             else:
                 if tp1_hit:
-                    qty = min(position.remaining_qty, position.qty * cfg.tp1_size)
+                    tp1_size = cfg.v2_tp1_size if cfg.strategy_family == "v2" else cfg.tp1_size
+                    qty = min(position.remaining_qty, position.qty * tp1_size)
                     fill = _exit_fill(position.tp1_price, cfg.slippage_rate)
                     pnl = (fill - position.entry_price) * qty * position.side
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
@@ -135,7 +140,8 @@ def run_backtest(
                     trades.append({"timestamp": ts, "event_type": "tp1", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
 
                 if tp2_hit and position is not None:
-                    qty = min(position.remaining_qty, position.qty * cfg.tp2_size)
+                    tp2_size = cfg.v2_tp2_size if cfg.strategy_family == "v2" else cfg.tp2_size
+                    qty = min(position.remaining_qty, position.qty * tp2_size)
                     fill = _exit_fill(position.tp2_price, cfg.slippage_rate)
                     pnl = (fill - position.entry_price) * qty * position.side
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
@@ -159,9 +165,33 @@ def run_backtest(
                     trades.append({"timestamp": ts, "event_type": "tp3", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
                     position = None
                     cooldown_bars = cfg.reentry_cooldown_bars
+                    reentry_bias_side = is_long * 2 - 1
+                    reentry_bars_left = cfg.v2_reentry_bars if cfg.strategy_family == "v2" else 0
+
+                if cfg.strategy_family == "v2" and position is not None:
+                    risk_per_unit = abs(position.entry_price - position.initial_stop)
+                    open_r = ((row["close"] - position.entry_price) * position.side) / risk_per_unit if risk_per_unit > 0 else 0.0
+                    adaptive_floor = max(cfg.v2_vol_stop_floor, cfg.stop_atr_mult * 0.8)
+                    adaptive_cap = min(cfg.v2_vol_stop_ceiling, cfg.stop_atr_mult * 1.4)
+                    vol_multiplier = adaptive_cap if bool(row.get("high_vol_regime", False)) else adaptive_floor
+                    atr_trail = row["close"] - position.side * vol_multiplier * row["atr14"]
+                    swing_stop = row["low"] if is_long else row["high"]
+                    lookback = max(2, int(cfg.v2_trail_swing_lookback))
+                    if is_long:
+                        swing_stop = df.loc[:ts].tail(lookback)["low"].min()
+                        trail_candidate = max(atr_trail, swing_stop)
+                        if open_r >= cfg.v2_trail_activation_r:
+                            position.stop_price = max(position.stop_price, trail_candidate)
+                    else:
+                        swing_stop = df.loc[:ts].tail(lookback)["high"].max()
+                        trail_candidate = min(atr_trail, swing_stop)
+                        if open_r >= cfg.v2_trail_activation_r:
+                            position.stop_price = min(position.stop_price, trail_candidate)
 
         if cooldown_bars > 0:
             cooldown_bars -= 1
+        if reentry_bars_left > 0:
+            reentry_bars_left -= 1
 
         if position is None and not monthly.entries_disabled and cooldown_bars == 0:
             breakout_signal = is_breakout_entry(row, cfg)
@@ -172,7 +202,28 @@ def run_backtest(
                 or (cfg.entry_mode == "pullback" and pullback_signal)
             )
             side = 1
-            if cfg.enable_short:
+            if cfg.strategy_family == "v2":
+                mode = cfg.v2_regime_mode
+                if bool(row.get("daily_regime", False)):
+                    should_enter = breakout_signal if mode == "breakout" else (breakout_signal or pullback_signal) if mode == "hybrid" else pullback_signal
+                    side = 1
+                elif bool(row.get("daily_bear_regime", False)) and cfg.enable_short:
+                    short_breakdown = is_breakdown_entry(row, cfg)
+                    short_pullback = is_short_pullback_entry(row, cfg)
+                    should_enter = short_breakdown if mode == "breakout" else (short_breakdown or short_pullback) if mode == "hybrid" else short_pullback
+                    side = -1
+                else:
+                    should_enter = False
+                    side = 1
+
+                if not should_enter and reentry_bars_left > 0 and reentry_bias_side != 0:
+                    trend_ok = (reentry_bias_side == 1 and row["close"] > row["ema20"]) or (reentry_bias_side == -1 and row["close"] < row["ema20"])
+                    continuation_break = (reentry_bias_side == 1 and row["close"] > row["high"] - 0.2 * row["atr14"]) or (reentry_bias_side == -1 and row["close"] < row["low"] + 0.2 * row["atr14"])
+                    if trend_ok and continuation_break:
+                        should_enter = True
+                        side = reentry_bias_side
+                        reentry_bars_left = 0
+            elif cfg.enable_short:
                 short_breakdown = is_breakdown_entry(row, cfg)
                 short_pullback = is_short_pullback_entry(row, cfg)
                 short_ok = (
@@ -187,7 +238,11 @@ def run_backtest(
                     side = -1
             if should_enter:
                 entry_price = _entry_fill(row["close"], cfg.slippage_rate)
-                stop_dist = cfg.stop_atr_mult * row["atr14"]
+                if cfg.strategy_family == "v2":
+                    vol_stop_mult = min(cfg.v2_vol_stop_ceiling, max(cfg.v2_vol_stop_floor, cfg.stop_atr_mult + (0.35 if bool(row.get("high_vol_regime", False)) else -0.25)))
+                    stop_dist = vol_stop_mult * row["atr14"]
+                else:
+                    stop_dist = cfg.stop_atr_mult * row["atr14"]
                 qty = compute_position_size(
                     equity=equity,
                     entry_price=entry_price,
@@ -207,9 +262,9 @@ def run_backtest(
                         remaining_qty=qty,
                         stop_price=stop_price,
                         initial_stop=stop_price,
-                        tp1_price=entry_price + side * cfg.tp1_r * stop_dist,
-                        tp2_price=entry_price + side * cfg.tp2_r * stop_dist,
-                        tp3_price=entry_price + side * cfg.tp3_r * stop_dist,
+                        tp1_price=entry_price + side * (cfg.v2_tp1_r if cfg.strategy_family == "v2" else cfg.tp1_r) * stop_dist,
+                        tp2_price=entry_price + side * (cfg.v2_tp2_r if cfg.strategy_family == "v2" else cfg.tp2_r) * stop_dist,
+                        tp3_price=entry_price + side * (cfg.v2_tp3_r if cfg.strategy_family == "v2" else cfg.tp3_r) * stop_dist,
                         side=side,
                     )
                     trades.append({

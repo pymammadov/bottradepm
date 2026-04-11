@@ -27,11 +27,13 @@ def _select_best(oos_df: pd.DataFrame) -> dict:
         raise ValueError("No optimization candidates produced")
     best = oos_df.iloc[0]
     cfg = {}
+    int_keys = {"breakout_lookback", "reentry_cooldown_bars", "v2_trail_swing_lookback", "v2_reentry_bars"}
+    bool_keys = {"move_stop_to_breakeven_after_tp1", "use_monthly_controls", "use_regime_filter", "enable_short"}
     for key in OPTIMIZATION_PARAM_KEYS:
         v = best[key]
-        if key in {"breakout_lookback", "reentry_cooldown_bars"}:
+        if key in int_keys:
             cfg[key] = int(v)
-        elif key in {"move_stop_to_breakeven_after_tp1", "use_monthly_controls", "use_regime_filter"}:
+        elif key in bool_keys:
             cfg[key] = bool(v)
         else:
             cfg[key] = float(v) if isinstance(v, (np.floating, float)) else v
@@ -84,7 +86,8 @@ def run_institutional_pipeline(csv_path: str, output_dir: str = "outputs", start
 
     results_df, oos_ranked_df, meta = run_parameter_sweep(df_1h=pd.concat([train_df, val_df]), starting_equity=starting_equity, output_dir=out_dir, train_ratio=0.75)
     best_params = _select_best(oos_ranked_df)
-    best_cfg = StrategyConfig(**best_params, enable_short=True, short_entry_mode="combined")
+    merged_best_params = {"enable_short": True, "short_entry_mode": "combined", **best_params}
+    best_cfg = StrategyConfig(**merged_best_params)
 
     val_report = run_backtest(val_df, config=best_cfg, starting_equity=starting_equity, output_dir=out_dir / "best_validation", data_source="best_validation", save_plot=False)
     oos_report = run_backtest(oos_df, config=best_cfg, starting_equity=starting_equity, output_dir=out_dir / "best_oos", data_source="best_oos", save_plot=False)
