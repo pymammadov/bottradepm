@@ -6,7 +6,7 @@ from src.strategy import StrategyConfig
 
 def make_fixture() -> pd.DataFrame:
     idx = pd.date_range("2025-01-01", periods=24 * 140, freq="H", tz="UTC")
-    base = pd.Series(10000 + (range(len(idx))), index=idx, dtype=float)
+    base = pd.Series([10000 + i for i in range(len(idx))], index=idx, dtype=float)
     df = pd.DataFrame(index=idx)
     df["open"] = base
     df["high"] = base + 20

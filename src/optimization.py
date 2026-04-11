@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from itertools import product
 from pathlib import Path
 
@@ -9,6 +10,29 @@ from src.backtest import run_backtest
 from src.strategy import StrategyConfig
 
 
+OPTIMIZATION_PARAM_KEYS = [
+    "risk_pct",
+    "stop_atr_mult",
+    "adx_threshold",
+    "breakout_lookback",
+    "pullback_rsi_min",
+    "pullback_rsi_max",
+    "trailing_atr_mult",
+    "tp1_r",
+    "tp2_r",
+    "tp3_r",
+    "entry_mode",
+    "breakout_volume_mult",
+    "breakout_close_buffer_atr",
+    "reentry_cooldown_bars",
+    "tp1_size",
+    "tp2_size",
+    "move_stop_to_breakeven_after_tp1",
+    "use_monthly_controls",
+    "use_regime_filter",
+]
+
+
 def _split_train_validation(df: pd.DataFrame, train_ratio: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     split_idx = int(len(df) * train_ratio)
     if split_idx <= 0 or split_idx >= len(df):
@@ -16,36 +40,54 @@ def _split_train_validation(df: pd.DataFrame, train_ratio: float) -> tuple[pd.Da
     return df.iloc[:split_idx].copy(), df.iloc[split_idx:].copy()
 
 
-def _balanced_score(report: dict) -> float:
+def _train_score(report: dict) -> float:
     avg_monthly = float(report.get("average_monthly_return_pct", 0.0) or 0.0)
     drawdown_abs = abs(float(report.get("max_drawdown_pct", 0.0) or 0.0))
     profit_factor = float(report.get("profit_factor", 0.0) or 0.0)
     trades = int(report.get("total_trades", 0) or 0)
 
-    score = avg_monthly * 3.0
-    score -= drawdown_abs * 0.9
+    score = avg_monthly * 3.8
+    score += min(max(profit_factor - 1.0, -1.0), 2.0) * 4.0
+    score -= drawdown_abs * 1.2
+    score += min(trades, 120) * 0.04
 
-    if profit_factor < 1.4:
-        score -= (1.4 - profit_factor) * 8.0
-    else:
-        score += min((profit_factor - 1.4) * 2.0, 2.5)
+    if trades < 20:
+        score -= (20 - trades) * 0.9
+    if profit_factor < 1.2:
+        score -= (1.2 - profit_factor) * 12.0
+    if drawdown_abs > 25:
+        score -= (drawdown_abs - 25) * 1.0
 
-    if trades < 25:
-        score -= (25 - trades) * 0.3
-    else:
-        score += min((trades - 25) * 0.03, 1.5)
+    return score
 
+
+def _oos_score(row: pd.Series) -> float:
+    val_monthly = float(row.get("validation_average_monthly_return_pct", 0.0) or 0.0)
+    val_pf = float(row.get("validation_profit_factor", 0.0) or 0.0)
+    val_dd = abs(float(row.get("validation_max_drawdown_pct", 0.0) or 0.0))
+    val_trades = int(row.get("validation_total_trades", 0) or 0)
+
+    train_monthly = float(row.get("train_average_monthly_return_pct", 0.0) or 0.0)
+    overfit_gap = max(0.0, train_monthly - val_monthly)
+
+    score = val_monthly * 4.0 + (val_pf - 1.0) * 5.0 - val_dd * 1.1 + min(val_trades, 80) * 0.05
+    score -= overfit_gap * 2.2
+    if val_trades < 20:
+        score -= (20 - val_trades) * 2.0
+    if val_pf < 1.1:
+        score -= (1.1 - val_pf) * 10.0
     return score
 
 
 def _config_grid() -> list[dict]:
     tp_structures = [
-        (1.0, 2.0, 3.2),
-        (1.2, 2.2, 4.0),
-        (1.4, 2.6, 4.5),
+        (1.0, 2.2, 4.2),
+        (1.2, 2.6, 4.8),
+        (1.4, 3.0, 6.0),
     ]
     rows: list[dict] = []
-    rsi_ranges = [(45.0, 60.0), (48.0, 62.0), (50.0, 65.0)]
+    report_keys: list[str] | None = None
+    rsi_ranges = [(44.0, 64.0), (46.0, 62.0), (48.0, 60.0)]
     for (
         risk_pct,
         stop_atr_mult,
@@ -54,16 +96,33 @@ def _config_grid() -> list[dict]:
         rsi_range,
         trailing_atr_mult,
         tp,
+        entry_mode,
+        volume_mult,
+        breakout_buffer,
+        cooldown,
+        tp_split,
+        move_be,
+        use_monthly_controls,
+        use_regime_filter,
     ) in product(
-        [0.006, 0.008, 0.01],
-        [1.6, 1.8],
-        [18.0, 22.0],
-        [20, 30],
+        [0.006, 0.008, 0.010, 0.012],
+        [1.5, 1.8, 2.1],
+        [16.0, 20.0, 24.0],
+        [15, 20, 30],
         rsi_ranges,
-        [0.4, 0.7],
+        [0.35, 0.5, 0.8],
         tp_structures,
+        ["combined", "breakout", "pullback"],
+        [1.2, 1.5],
+        [0.0, 0.2],
+        [0, 1],
+        [(0.25, 0.25), (0.35, 0.30), (0.45, 0.25)],
+        [True, False],
+        [True, False],
+        [True, False],
     ):
         pullback_rsi_min, pullback_rsi_max = rsi_range
+        tp1_size, tp2_size = tp_split
         rows.append(
             {
                 "risk_pct": risk_pct,
@@ -76,9 +135,35 @@ def _config_grid() -> list[dict]:
                 "tp1_r": tp[0],
                 "tp2_r": tp[1],
                 "tp3_r": tp[2],
+                "entry_mode": entry_mode,
+                "breakout_volume_mult": volume_mult,
+                "breakout_close_buffer_atr": breakout_buffer,
+                "reentry_cooldown_bars": cooldown,
+                "tp1_size": tp1_size,
+                "tp2_size": tp2_size,
+                "move_stop_to_breakeven_after_tp1": move_be,
+                "use_monthly_controls": use_monthly_controls,
+                "use_regime_filter": use_regime_filter,
             }
         )
-    return rows
+    max_grid_size = 320
+    if len(rows) <= max_grid_size:
+        return rows
+    rng = random.Random(42)
+    return rng.sample(rows, max_grid_size)
+
+
+def _extract_config(row: pd.Series) -> dict:
+    cfg = {}
+    for key in OPTIMIZATION_PARAM_KEYS:
+        value = row[key]
+        if key in {"breakout_lookback", "reentry_cooldown_bars"}:
+            cfg[key] = int(value)
+        elif key in {"move_stop_to_breakeven_after_tp1", "use_monthly_controls", "use_regime_filter"}:
+            cfg[key] = bool(value)
+        else:
+            cfg[key] = value
+    return cfg
 
 
 def run_parameter_sweep(
@@ -86,7 +171,7 @@ def run_parameter_sweep(
     starting_equity: float = 10_000.0,
     output_dir: str | Path = "outputs",
     train_ratio: float = 0.7,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -94,37 +179,30 @@ def run_parameter_sweep(
     grid = _config_grid()
 
     rows: list[dict] = []
-    for params in grid:
+    report_keys: list[str] | None = None
+    for idx, params in enumerate(grid, start=1):
         cfg = StrategyConfig(**params)
         train_report = run_backtest(
             df_1h=train_df,
             config=cfg,
             starting_equity=starting_equity,
-            output_dir=out_dir / "train_runs",
+            output_dir=out_dir / "train_runs" / f"cfg_{idx:05d}",
             data_source="optimization_train",
+            save_plot=False,
         )
         row = {**params}
         row.update({f"train_{k}": v for k, v in train_report.items()})
-        row["balanced_score"] = _balanced_score(train_report)
+        row["train_score"] = _train_score(train_report)
         rows.append(row)
+        if report_keys is None:
+            report_keys = list(train_report.keys())
 
-    results_df = pd.DataFrame(rows).sort_values("balanced_score", ascending=False).reset_index(drop=True)
+    results_df = pd.DataFrame(rows).sort_values("train_score", ascending=False).reset_index(drop=True)
 
-    top3_rows = results_df.head(3)
+    top_candidates = results_df.head(10)
     oos_rows: list[dict] = []
-    for rank, row in top3_rows.iterrows():
-        cfg_params = {
-            "risk_pct": row["risk_pct"],
-            "stop_atr_mult": row["stop_atr_mult"],
-            "adx_threshold": row["adx_threshold"],
-            "breakout_lookback": int(row["breakout_lookback"]),
-            "pullback_rsi_min": row["pullback_rsi_min"],
-            "pullback_rsi_max": row["pullback_rsi_max"],
-            "trailing_atr_mult": row["trailing_atr_mult"],
-            "tp1_r": row["tp1_r"],
-            "tp2_r": row["tp2_r"],
-            "tp3_r": row["tp3_r"],
-        }
+    for rank, row in top_candidates.iterrows():
+        cfg_params = _extract_config(row)
         cfg = StrategyConfig(**cfg_params)
         val_report = run_backtest(
             df_1h=validation_df,
@@ -132,112 +210,32 @@ def run_parameter_sweep(
             starting_equity=starting_equity,
             output_dir=out_dir / f"validation_rank_{rank + 1}",
             data_source="optimization_validation",
+            save_plot=False,
         )
         out_row = {
             "validation_rank": rank + 1,
             **cfg_params,
+            **{f"train_{k}": row[f"train_{k}"] for k in (report_keys or [])},
             **{f"validation_{k}": v for k, v in val_report.items()},
         }
+        out_row["oos_score"] = _oos_score(pd.Series(out_row))
         oos_rows.append(out_row)
 
-    oos_df = pd.DataFrame(oos_rows)
+    oos_df = pd.DataFrame(oos_rows).sort_values("oos_score", ascending=False).reset_index(drop=True)
+
+    meta = {
+        "train_start": str(train_df.index.min()),
+        "train_end": str(train_df.index.max()),
+        "validation_start": str(validation_df.index.min()),
+        "validation_end": str(validation_df.index.max()),
+        "train_ratio": train_ratio,
+        "tested_parameter_sets": len(grid),
+        "train_score_formula": "3.8*avg_monthly + 4*(pf-1) - 1.2*|dd| + 0.04*trades with penalties for low trades/pf and extreme dd",
+        "oos_score_formula": "4*val_monthly + 5*(val_pf-1) - 1.1*|val_dd| + 0.05*val_trades - 2.2*max(0, train_monthly-val_monthly) with low trades/pf penalties",
+    }
 
     results_df.to_csv(out_dir / "optimization_results.csv", index=False)
     results_df.head(10).to_csv(out_dir / "optimization_top10.csv", index=False)
-    oos_df.to_csv(out_dir / "optimization_top3_oos.csv", index=False)
+    oos_df.to_csv(out_dir / "optimization_top10_oos.csv", index=False)
 
-    return results_df, oos_df
-
-
-def build_optimization_summary(
-    baseline_metrics: dict[str, float],
-    results_df: pd.DataFrame,
-    oos_df: pd.DataFrame,
-    output_dir: str | Path = "outputs",
-    train_ratio: float = 0.7,
-) -> Path:
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = out_dir / "optimization_summary.md"
-
-    top10 = results_df.head(10)
-
-    best_monthly_row = top10.sort_values("train_average_monthly_return_pct", ascending=False).iloc[0].to_dict()
-
-    if oos_df.empty:
-        best_tradeoff_row = {}
-    else:
-        ranked = oos_df.copy()
-        ranked["tradeoff_score"] = (
-            ranked["validation_average_monthly_return_pct"] * 3.0
-            - ranked["validation_max_drawdown_pct"].abs() * 1.2
-        )
-        best_tradeoff_row = ranked.sort_values("tradeoff_score", ascending=False).iloc[0].to_dict()
-
-    lines: list[str] = []
-    lines.append("# Optimization Summary")
-    lines.append("")
-    lines.append("## Baseline metrics (current reproducible run)")
-    for k, v in baseline_metrics.items():
-        lines.append(f"- {k}: {v}")
-    lines.append("")
-    lines.append("## Method and anti-overfitting assumptions")
-    lines.append(
-        f"- Data is split chronologically into train/validation using train_ratio={train_ratio:.2f}; "
-        "no shuffling is used."
-    )
-    lines.append("- Parameter sweep rankings are based on train metrics only, then validated out-of-sample on the top 3.")
-    lines.append("- Balanced score rewards average monthly return, penalizes drawdown, and enforces PF/trade-count quality gates.")
-    lines.append("- Validation is used for selection sanity-checks rather than repeated retuning.")
-    lines.append("")
-    lines.append("## Top 10 train-ranked parameter sets")
-    lines.append(f"- Saved to `{(out_dir / 'optimization_top10.csv').as_posix()}`.")
-    lines.append("- Full grid results saved to `outputs/optimization_results.csv`.")
-    lines.append("")
-    lines.append("## Out-of-sample validation (top 3)")
-    lines.append(f"- Saved to `{(out_dir / 'optimization_top3_oos.csv').as_posix()}`.")
-    lines.append("")
-    lines.append("## Best return/drawdown tradeoff set (from OOS top 3)")
-    if best_tradeoff_row:
-        lines.append(
-            "- Validation rank "
-            f"{int(best_tradeoff_row['validation_rank'])}: "
-            f"avg_monthly={best_tradeoff_row['validation_average_monthly_return_pct']:.2f}%, "
-            f"max_drawdown={best_tradeoff_row['validation_max_drawdown_pct']:.2f}%, "
-            f"profit_factor={best_tradeoff_row['validation_profit_factor']:.2f}, "
-            f"trades={int(best_tradeoff_row['validation_total_trades'])}"
-        )
-        lines.append(
-            "- Parameters: "
-            f"risk_pct={best_tradeoff_row['risk_pct']}, stop_atr_mult={best_tradeoff_row['stop_atr_mult']}, "
-            f"tp=({best_tradeoff_row['tp1_r']}, {best_tradeoff_row['tp2_r']}, {best_tradeoff_row['tp3_r']}), "
-            f"adx_threshold={best_tradeoff_row['adx_threshold']}, "
-            f"breakout_lookback={int(best_tradeoff_row['breakout_lookback'])}, "
-            f"pullback_rsi=[{best_tradeoff_row['pullback_rsi_min']}, {best_tradeoff_row['pullback_rsi_max']}], "
-            f"trailing_atr_mult={best_tradeoff_row['trailing_atr_mult']}"
-        )
-    else:
-        lines.append("- No validation rows available.")
-    lines.append("")
-    lines.append("## Set with strongest average monthly return improvement (train top 10)")
-    lines.append(
-        f"- avg_monthly={best_monthly_row['train_average_monthly_return_pct']:.2f}% "
-        f"(baseline {baseline_metrics.get('average_monthly_return_pct', 0.0):.2f}%)."
-    )
-    lines.append(
-        "- Parameters: "
-        f"risk_pct={best_monthly_row['risk_pct']}, stop_atr_mult={best_monthly_row['stop_atr_mult']}, "
-        f"tp=({best_monthly_row['tp1_r']}, {best_monthly_row['tp2_r']}, {best_monthly_row['tp3_r']}), "
-        f"adx_threshold={best_monthly_row['adx_threshold']}, "
-        f"breakout_lookback={int(best_monthly_row['breakout_lookback'])}, "
-        f"pullback_rsi=[{best_monthly_row['pullback_rsi_min']}, {best_monthly_row['pullback_rsi_max']}], "
-        f"trailing_atr_mult={best_monthly_row['trailing_atr_mult']}"
-    )
-    lines.append("")
-    lines.append("## Caution")
-    lines.append(
-        "- Before deployment, run walk-forward testing across multiple market regimes to reduce single-split bias."
-    )
-
-    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return summary_path
+    return results_df, oos_df, meta
