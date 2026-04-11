@@ -21,7 +21,20 @@ class StrategyConfig:
     breakout_lookback: int = 20
     pullback_rsi_min: float = 48.0
     pullback_rsi_max: float = 62.0
-    trailing_stop_mult: float = 0.5
+    trailing_atr_mult: float = 0.5
+    tp1_size: float = 0.4
+    tp2_size: float = 0.3
+    entry_mode: str = "combined"  # combined|breakout|pullback
+    breakout_volume_mult: float = 1.0
+    breakout_close_buffer_atr: float = 0.0
+    use_regime_filter: bool = True
+    reentry_cooldown_bars: int = 0
+    use_monthly_controls: bool = True
+    move_stop_to_breakeven_after_tp1: bool = True
+    monthly_min_return_pct: float = 0.10  # Minimum 10% monthly return target
+    scale_up_threshold: float = 0.08  # Scale up position size at 8%
+    scale_down_threshold: float = 0.12  # Scale down at 12%
+    loss_stop_threshold: float = -0.04  # Stop entries at -4% monthly loss
 
 
 @dataclass
@@ -46,32 +59,40 @@ class MonthlyState:
     start_equity: float | None = None
     size_multiplier: float = 1.0
     entries_disabled: bool = False
+    monthly_return_pct: float = 0.0
+    target_met: bool = False
 
 
-def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyConfig) -> pd.DataFrame:
+def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyConfig | None = None) -> pd.DataFrame:
+    cfg = config or StrategyConfig()
     out = df_4h.copy()
     out["ema20"] = ema(out["close"], 20)
     out["ema50"] = ema(out["close"], 50)
     out["atr14"] = atr(out, 14)
     out["rsi14"] = rsi(out["close"], 14)
-    out["prior_20_high"] = out["high"].rolling(config.breakout_lookback).max().shift(1)
-    out["vol_ma20"] = out["volume"].rolling(config.breakout_lookback).mean()
+    out["prior_lookback_high"] = out["high"].rolling(cfg.breakout_lookback).max().shift(1)
+    out["vol_ma20"] = out["volume"].rolling(20).mean()
 
     d = df_daily.copy()
     d["d_ema50"] = ema(d["close"], 50)
     d["d_ema200"] = ema(d["close"], 200)
     d["d_adx14"] = adx(d, 14)
+    d["d_ema200_proxy"] = d["d_ema200"].fillna(d["d_ema50"] * 0.995)
     d["daily_regime"] = (
-        (d["close"] > d["d_ema200"])
-        & (d["d_ema50"] > d["d_ema200"])
-        & (d["d_adx14"] > config.adx_threshold)
+        (d["close"] > d["d_ema200_proxy"])
+        & (d["d_ema50"] > d["d_ema200_proxy"])
+        & (d["d_adx14"] > cfg.adx_threshold)
     ).shift(1)
 
     cols = d[["daily_regime", "d_ema50", "d_ema200", "d_adx14"]]
     out = out.merge(cols, left_index=True, right_index=True, how="left")
+    out = out.infer_objects(copy=False)
     out[["daily_regime", "d_ema50", "d_ema200", "d_adx14"]] = out[
         ["daily_regime", "d_ema50", "d_ema200", "d_adx14"]
     ].ffill()
+    out["d_ema200"] = out["d_ema200"].fillna(out["d_ema50"])
+    out["d_adx14"] = out["d_adx14"].fillna(0.0)
+    out["daily_regime"] = out["daily_regime"].astype("boolean").fillna(False).astype(bool)
     return out
 
 
@@ -89,18 +110,22 @@ def compute_position_size(
     return max(0.0, min(raw_qty, cap_qty))
 
 
-def is_breakout_entry(row: pd.Series) -> bool:
+def is_breakout_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
+    cfg = config or StrategyConfig()
+    close_buffer = cfg.breakout_close_buffer_atr * row["atr14"]
+    regime_ok = (not cfg.use_regime_filter) or bool(row["daily_regime"])
     return bool(
-        row["daily_regime"]
-        and row["close"] > row["prior_20_high"]
-        and row["volume"] > 1.5 * row["vol_ma20"]
+        regime_ok
+        and row["close"] > (row["prior_lookback_high"] + close_buffer)
+        and row["volume"] > cfg.breakout_volume_mult * row["vol_ma20"]
         and row["close"] > row["ema20"]
         and row["close"] > row["ema50"]
     )
 
-
-def is_pullback_entry(row: pd.Series, config: StrategyConfig) -> bool:
+def is_pullback_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
+    cfg = config or StrategyConfig()
+    regime_ok = (not cfg.use_regime_filter) or bool(row["daily_regime"])
     touch_ema = (row["low"] <= row["ema20"] <= row["close"]) or (row["low"] <= row["ema50"] <= row["close"])
     bullish = row["close"] > row["open"]
-    rsi_ok = config.pullback_rsi_min <= row["rsi14"] <= config.pullback_rsi_max
-    return bool(row["daily_regime"] and touch_ema and bullish and rsi_ok and row["close"] > row["ema50"])
+    rsi_ok = cfg.pullback_rsi_min <= row["rsi14"] <= cfg.pullback_rsi_max
+    return bool(regime_ok and touch_ema and bullish and rsi_ok and row["close"] > row["ema50"])

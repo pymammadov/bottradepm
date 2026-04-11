@@ -78,10 +78,10 @@ Outputs:
 - `outputs/report.json`
 - `outputs/equity_curve.png`
 
-## Run optimization
+## Run optimization sweep (train/validation)
 
 ```bash
-python scripts/run_optimization.py --csv data/btcusdt_1h.csv
+python scripts/run_optimization.py --csv data/btcusdt_1h.csv --train-ratio 0.7
 ```
 
 The optimization performs a grid search across key strategy parameters:
@@ -93,9 +93,12 @@ The optimization performs a grid search across key strategy parameters:
 - Pullback RSI range
 - Trailing stop aggressiveness
 
-Outputs:
-- `outputs/optimization_results.csv` - All parameter combinations with performance metrics
-- `outputs/optimization_summary.json` - Top 10 ranked parameter sets and out-of-sample validation results
+Optimization outputs:
+- `outputs/optimization_results.csv`
+- `outputs/optimization_top10.csv`
+- `outputs/optimization_top3_oos.csv`
+- `outputs/optimization_summary.json`
+- `outputs/best_model_report.json`
 
 Parameters are ranked by a balanced score considering monthly returns, drawdown, profit factor, and trade count.
 
@@ -115,6 +118,22 @@ Parameters are ranked by a balanced score considering monthly returns, drawdown,
 - average R multiple
 - number of forced closes
 - data source tag (public CSV vs synthetic)
+
+
+## Troubleshooting: `ModuleNotFoundError: No module named data_loader`
+
+If you see this during `pytest`, it means one of the `src/*.py` files used a non-package import like `from data_loader import ...`.
+Use package-qualified imports instead:
+
+```python
+from src.data_loader import ...
+```
+
+Then run tests from the repository root:
+
+```bash
+python -m pytest -q
+```
 
 ## Tests
 

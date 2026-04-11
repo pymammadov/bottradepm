@@ -14,6 +14,8 @@ def max_drawdown_pct(equity_curve: pd.Series) -> float:
 
 
 def average_monthly_return_pct(equity_df: pd.DataFrame) -> float:
+    if equity_df.empty or "equity" not in equity_df.columns:
+        return float("nan")
     monthly = equity_df.resample("ME").last()["equity"]
     if len(monthly) < 2:
         return float("nan")
@@ -23,6 +25,52 @@ def average_monthly_return_pct(equity_df: pd.DataFrame) -> float:
     return float(returns.mean() * 100)
 
 
+def monthly_returns_stats(equity_df: pd.DataFrame, min_target_pct: float = 10.0) -> dict[str, Any]:
+    if equity_df.empty or "equity" not in equity_df.columns:
+        return {
+            "months_count": 0,
+            "average_monthly_return_pct": float("nan"),
+            "min_monthly_return_pct": float("nan"),
+            "max_monthly_return_pct": float("nan"),
+            "months_meeting_target": 0,
+            "target_achievement_pct": 0.0,
+        }
+    monthly = equity_df.resample("ME").last()["equity"]
+    if len(monthly) < 2:
+        return {
+            "months_count": 0,
+            "average_monthly_return_pct": float("nan"),
+            "min_monthly_return_pct": float("nan"),
+            "max_monthly_return_pct": float("nan"),
+            "months_meeting_target": 0,
+            "target_achievement_pct": 0.0,
+        }
+
+    returns = monthly.pct_change().dropna()
+    if returns.empty:
+        return {
+            "months_count": 0,
+            "average_monthly_return_pct": float("nan"),
+            "min_monthly_return_pct": float("nan"),
+            "max_monthly_return_pct": float("nan"),
+            "months_meeting_target": 0,
+            "target_achievement_pct": 0.0,
+        }
+
+    returns_pct = returns * 100
+    months_meeting_target = int((returns_pct >= min_target_pct).sum())
+    target_achievement_pct = (months_meeting_target / len(returns_pct) * 100) if len(returns_pct) > 0 else 0.0
+
+    return {
+        "months_count": len(returns_pct),
+        "average_monthly_return_pct": float(returns_pct.mean()),
+        "min_monthly_return_pct": float(returns_pct.min()),
+        "max_monthly_return_pct": float(returns_pct.max()),
+        "months_meeting_target": months_meeting_target,
+        "target_achievement_pct": target_achievement_pct,
+    }
+
+
 def summarize_report(
     starting_equity: float,
     ending_equity: float,
@@ -30,10 +78,11 @@ def summarize_report(
     equity_curve: pd.DataFrame,
     forced_close_count: int,
     data_source: str,
+    monthly_min_target_pct: float = 10.0,
 ) -> dict[str, Any]:
     total_return_pct = ((ending_equity / starting_equity) - 1) * 100
     if trades.empty or "event_type" not in trades.columns:
-        closed = pd.DataFrame()
+        closed = pd.DataFrame(columns=["realized_pnl", "r_multiple"])
         total_trades = 0
     else:
         closed = trades[trades["event_type"].isin(["stop", "tp1", "tp2", "tp3", "force_close"])]
@@ -49,11 +98,14 @@ def summarize_report(
     expectancy = float(trade_pnls.mean()) if len(trade_pnls) else 0.0
     avg_r = float(closed["r_multiple"].dropna().mean()) if not closed.empty and "r_multiple" in closed else 0.0
 
+    monthly_stats = monthly_returns_stats(equity_curve, monthly_min_target_pct)
+
     return {
         "starting_equity": starting_equity,
         "ending_equity": ending_equity,
         "total_return_pct": total_return_pct,
         "average_monthly_return_pct": average_monthly_return_pct(equity_curve),
+        "monthly_statistics": monthly_stats,
         "total_trades": total_trades,
         "win_rate_pct": win_rate,
         "average_win": avg_win,

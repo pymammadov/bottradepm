@@ -33,17 +33,32 @@ def run_backtest(
     starting_equity: float = 10_000.0,
     output_dir: str | Path = "outputs",
     data_source: str = "public_csv",
+    save_plot: bool = True,
 ) -> dict:
     cfg = config or StrategyConfig()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if 'timestamp' in df_1h.columns:
-        df_1h = df_1h.set_index('timestamp')
+    if "timestamp" in df_1h.columns:
+        df_1h = df_1h.set_index("timestamp")
 
     df_4h = resample_ohlcv(df_1h, "4h")
     df_daily = resample_ohlcv(df_1h, "1d")
     df = add_features(df_4h, df_daily, cfg).dropna().copy()
+    if df.empty:
+        report = summarize_report(
+            starting_equity=starting_equity,
+            ending_equity=starting_equity,
+            trades=pd.DataFrame(),
+            equity_curve=pd.DataFrame({"equity": []}),
+            forced_close_count=0,
+            data_source=data_source,
+            monthly_min_target_pct=cfg.monthly_min_return_pct * 100,
+        )
+        pd.DataFrame().to_csv(out_dir / "trades.csv", index=False)
+        pd.DataFrame({"equity": []}).to_csv(out_dir / "equity_curve.csv")
+        (out_dir / "report.json").write_text(json.dumps(report, indent=2))
+        return report
 
     equity = starting_equity
     position: Position | None = None
@@ -51,6 +66,7 @@ def run_backtest(
     curve: list[dict] = []
     monthly = MonthlyState()
     forced_close_count = 0
+    cooldown_bars = 0
 
     for ts, row in df.iterrows():
         current_month = ts.strftime("%Y-%m")
@@ -59,13 +75,21 @@ def run_backtest(
             monthly.start_equity = equity
             monthly.size_multiplier = 1.0
             monthly.entries_disabled = False
+            monthly.monthly_return_pct = 0.0
+            monthly.target_met = False
 
         if monthly.start_equity and monthly.start_equity > 0:
             month_ret = (equity / monthly.start_equity) - 1
-            if month_ret >= 0.10:
-                monthly.size_multiplier = 0.5
-            if month_ret <= -0.04:
-                monthly.entries_disabled = True
+            monthly.monthly_return_pct = month_ret
+
+            if cfg.use_monthly_controls:
+                if month_ret >= cfg.monthly_min_return_pct:
+                    monthly.target_met = True
+                    monthly.size_multiplier = max(0.3, monthly.size_multiplier - 0.1)
+                elif month_ret >= cfg.scale_up_threshold:
+                    monthly.size_multiplier = min(1.5, monthly.size_multiplier + 0.15)
+                elif month_ret <= cfg.loss_stop_threshold:
+                    monthly.entries_disabled = True
 
         if position is not None:
             stop_hit = row["low"] <= position.stop_price
@@ -90,28 +114,30 @@ def run_backtest(
                     "r_multiple": r_mult,
                 })
                 position = None
+                cooldown_bars = cfg.reentry_cooldown_bars
             else:
                 if tp1_hit:
-                    qty = position.qty * 0.4
+                    qty = min(position.remaining_qty, position.qty * cfg.tp1_size)
                     fill = _exit_fill(position.tp1_price, cfg.slippage_rate)
                     pnl = (fill - position.entry_price) * qty
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
                     equity += pnl - fee
                     position.remaining_qty -= qty
                     position.tp1_done = True
-                    position.stop_price = position.entry_price
+                    if cfg.move_stop_to_breakeven_after_tp1:
+                        position.stop_price = position.entry_price
                     r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
                     trades.append({"timestamp": ts, "event_type": "tp1", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
 
                 if tp2_hit and position is not None:
-                    qty = position.qty * 0.3
+                    qty = min(position.remaining_qty, position.qty * cfg.tp2_size)
                     fill = _exit_fill(position.tp2_price, cfg.slippage_rate)
                     pnl = (fill - position.entry_price) * qty
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
                     equity += pnl - fee
                     position.remaining_qty -= qty
                     position.tp2_done = True
-                    trail = row["ema20"] - cfg.trailing_stop_mult * row["atr14"]
+                    trail = row["ema20"] - cfg.trailing_atr_mult * row["atr14"]
                     position.stop_price = max(position.stop_price, trail)
                     r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
                     trades.append({"timestamp": ts, "event_type": "tp2", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
@@ -125,9 +151,20 @@ def run_backtest(
                     r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
                     trades.append({"timestamp": ts, "event_type": "tp3", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
                     position = None
+                    cooldown_bars = cfg.reentry_cooldown_bars
 
-        if position is None and not monthly.entries_disabled:
-            if is_breakout_entry(row) or is_pullback_entry(row, cfg):
+        if cooldown_bars > 0:
+            cooldown_bars -= 1
+
+        if position is None and not monthly.entries_disabled and cooldown_bars == 0:
+            breakout_signal = is_breakout_entry(row, cfg)
+            pullback_signal = is_pullback_entry(row, cfg)
+            should_enter = (
+                (cfg.entry_mode == "combined" and (breakout_signal or pullback_signal))
+                or (cfg.entry_mode == "breakout" and breakout_signal)
+                or (cfg.entry_mode == "pullback" and pullback_signal)
+            )
+            if should_enter:
                 entry_price = _entry_fill(row["close"], cfg.slippage_rate)
                 stop_dist = cfg.stop_atr_mult * row["atr14"]
                 qty = compute_position_size(
@@ -188,11 +225,20 @@ def run_backtest(
         })
         forced_close_count += 1
 
-    if trades:
-        trades_df = pd.DataFrame(trades)
+    trade_columns = ["timestamp", "event_type", "price", "qty", "realized_pnl", "equity", "r_multiple", "size_multiplier"]
+    trades_df = pd.DataFrame(trades)
+    if trades_df.empty:
+        trades_df = pd.DataFrame(columns=trade_columns)
     else:
-        trades_df = pd.DataFrame(columns=["timestamp", "event_type", "price", "qty", "realized_pnl", "equity", "r_multiple", "size_multiplier"])
-    equity_df = pd.DataFrame(curve).set_index("timestamp")
+        for col in trade_columns:
+            if col not in trades_df.columns:
+                trades_df[col] = None
+
+    equity_curve_raw = pd.DataFrame(curve)
+    if equity_curve_raw.empty:
+        equity_df = pd.DataFrame({"equity": [starting_equity]}, index=[df.index[0]])
+    else:
+        equity_df = equity_curve_raw.set_index("timestamp")
 
     report = summarize_report(
         starting_equity=starting_equity,
@@ -201,17 +247,19 @@ def run_backtest(
         equity_curve=equity_df,
         forced_close_count=forced_close_count,
         data_source=data_source,
+        monthly_min_target_pct=cfg.monthly_min_return_pct * 100,
     )
 
     trades_df.to_csv(out_dir / "trades.csv", index=False)
     equity_df.to_csv(out_dir / "equity_curve.csv")
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
 
-    plt.figure(figsize=(10, 4))
-    plt.plot(equity_df.index, equity_df["equity"])
-    plt.title("Equity Curve")
-    plt.tight_layout()
-    plt.savefig(out_dir / "equity_curve.png")
-    plt.close()
+    if save_plot:
+        plt.figure(figsize=(10, 4))
+        plt.plot(equity_df.index, equity_df["equity"])
+        plt.title("Equity Curve")
+        plt.tight_layout()
+        plt.savefig(out_dir / "equity_curve.png")
+        plt.close()
 
     return report
