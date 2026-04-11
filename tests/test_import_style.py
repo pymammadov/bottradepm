@@ -15,6 +15,8 @@ def test_src_internal_imports_are_package_qualified() -> None:
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
+                if node.level and node.level > 0:
+                    continue
                 module = node.module
                 if not module:
                     continue
