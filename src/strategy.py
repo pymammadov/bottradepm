@@ -22,6 +22,15 @@ class StrategyConfig:
     pullback_rsi_min: float = 48.0
     pullback_rsi_max: float = 62.0
     trailing_atr_mult: float = 0.5
+    tp1_size: float = 0.4
+    tp2_size: float = 0.3
+    entry_mode: str = "combined"  # combined|breakout|pullback
+    breakout_volume_mult: float = 1.0
+    breakout_close_buffer_atr: float = 0.0
+    use_regime_filter: bool = True
+    reentry_cooldown_bars: int = 0
+    use_monthly_controls: bool = True
+    move_stop_to_breakeven_after_tp1: bool = True
     monthly_min_return_pct: float = 0.10  # Minimum 10% monthly return target
     scale_up_threshold: float = 0.08  # Scale up position size at 8%
     scale_down_threshold: float = 0.12  # Scale down at 12%
@@ -68,9 +77,10 @@ def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyCo
     d["d_ema50"] = ema(d["close"], 50)
     d["d_ema200"] = ema(d["close"], 200)
     d["d_adx14"] = adx(d, 14)
+    d["d_ema200_proxy"] = d["d_ema200"].fillna(d["d_ema50"] * 0.995)
     d["daily_regime"] = (
-        (d["close"] > d["d_ema200"])
-        & (d["d_ema50"] > d["d_ema200"])
+        (d["close"] > d["d_ema200_proxy"])
+        & (d["d_ema50"] > d["d_ema200_proxy"])
         & (d["d_adx14"] > cfg.adx_threshold)
     ).shift(1)
 
@@ -79,6 +89,9 @@ def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyCo
     out[["daily_regime", "d_ema50", "d_ema200", "d_adx14"]] = out[
         ["daily_regime", "d_ema50", "d_ema200", "d_adx14"]
     ].ffill()
+    out["d_ema200"] = out["d_ema200"].fillna(out["d_ema50"])
+    out["d_adx14"] = out["d_adx14"].fillna(0.0)
+    out["daily_regime"] = out["daily_regime"].fillna(False)
     return out
 
 
@@ -97,11 +110,13 @@ def compute_position_size(
 
 
 def is_breakout_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
-    _ = config or StrategyConfig()
+    cfg = config or StrategyConfig()
+    close_buffer = cfg.breakout_close_buffer_atr * row["atr14"]
+    regime_ok = (not cfg.use_regime_filter) or bool(row["daily_regime"])
     return bool(
-        row["daily_regime"]
-        and row["close"] > row["prior_lookback_high"]
-        and row["volume"] > 1.5 * row["vol_ma20"]
+        regime_ok
+        and row["close"] > (row["prior_lookback_high"] + close_buffer)
+        and row["volume"] > cfg.breakout_volume_mult * row["vol_ma20"]
         and row["close"] > row["ema20"]
         and row["close"] > row["ema50"]
     )
@@ -109,7 +124,8 @@ def is_breakout_entry(row: pd.Series, config: StrategyConfig | None = None) -> b
 
 def is_pullback_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
     cfg = config or StrategyConfig()
+    regime_ok = (not cfg.use_regime_filter) or bool(row["daily_regime"])
     touch_ema = (row["low"] <= row["ema20"] <= row["close"]) or (row["low"] <= row["ema50"] <= row["close"])
     bullish = row["close"] > row["open"]
     rsi_ok = cfg.pullback_rsi_min <= row["rsi14"] <= cfg.pullback_rsi_max
-    return bool(row["daily_regime"] and touch_ema and bullish and rsi_ok and row["close"] > row["ema50"])
+    return bool(regime_ok and touch_ema and bullish and rsi_ok and row["close"] > row["ema50"])
