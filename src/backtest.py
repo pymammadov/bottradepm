@@ -6,9 +6,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from src.data_loader import resample_ohlcv
-from src.performance import summarize_report
-from src.strategy import (
+from .data_loader import resample_ohlcv
+from .performance import summarize_report
+from .strategy import (
     MonthlyState,
     Position,
     StrategyConfig,
@@ -38,9 +38,12 @@ def run_backtest(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df_4h = resample_ohlcv(df_1h, "4H")
-    df_daily = resample_ohlcv(df_1h, "1D")
-    df = add_features(df_4h, df_daily).dropna().copy()
+    if 'timestamp' in df_1h.columns:
+        df_1h = df_1h.set_index('timestamp')
+
+    df_4h = resample_ohlcv(df_1h, "4h")
+    df_daily = resample_ohlcv(df_1h, "1d")
+    df = add_features(df_4h, df_daily, cfg).dropna().copy()
 
     equity = starting_equity
     position: Position | None = None
@@ -50,7 +53,7 @@ def run_backtest(
     forced_close_count = 0
 
     for ts, row in df.iterrows():
-        current_month = ts.to_period("M")
+        current_month = ts.strftime("%Y-%m")
         if monthly.month != current_month:
             monthly.month = current_month
             monthly.start_equity = equity
@@ -108,7 +111,7 @@ def run_backtest(
                     equity += pnl - fee
                     position.remaining_qty -= qty
                     position.tp2_done = True
-                    trail = row["ema20"] - 0.5 * row["atr14"]
+                    trail = row["ema20"] - cfg.trailing_stop_mult * row["atr14"]
                     position.stop_price = max(position.stop_price, trail)
                     r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
                     trades.append({"timestamp": ts, "event_type": "tp2", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
@@ -124,7 +127,7 @@ def run_backtest(
                     position = None
 
         if position is None and not monthly.entries_disabled:
-            if is_breakout_entry(row) or is_pullback_entry(row):
+            if is_breakout_entry(row) or is_pullback_entry(row, cfg):
                 entry_price = _entry_fill(row["close"], cfg.slippage_rate)
                 stop_dist = cfg.stop_atr_mult * row["atr14"]
                 qty = compute_position_size(
@@ -185,7 +188,10 @@ def run_backtest(
         })
         forced_close_count += 1
 
-    trades_df = pd.DataFrame(trades)
+    if trades:
+        trades_df = pd.DataFrame(trades)
+    else:
+        trades_df = pd.DataFrame(columns=["timestamp", "event_type", "price", "qty", "realized_pnl", "equity", "r_multiple", "size_multiplier"])
     equity_df = pd.DataFrame(curve).set_index("timestamp")
 
     report = summarize_report(

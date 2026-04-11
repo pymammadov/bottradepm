@@ -78,6 +78,27 @@ Outputs:
 - `outputs/report.json`
 - `outputs/equity_curve.png`
 
+## Run optimization
+
+```bash
+python scripts/run_optimization.py --csv data/btcusdt_1h.csv
+```
+
+The optimization performs a grid search across key strategy parameters:
+- Risk percentage
+- ATR stop multiple
+- Take profit ratios (TP1, TP2, TP3)
+- ADX threshold
+- Breakout lookback period
+- Pullback RSI range
+- Trailing stop aggressiveness
+
+Outputs:
+- `outputs/optimization_results.csv` - All parameter combinations with performance metrics
+- `outputs/optimization_summary.json` - Top 10 ranked parameter sets and out-of-sample validation results
+
+Parameters are ranked by a balanced score considering monthly returns, drawdown, profit factor, and trade count.
+
 ## Report fields
 
 - starting equity

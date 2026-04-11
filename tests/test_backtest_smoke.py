@@ -4,7 +4,7 @@ from src.backtest import run_backtest
 
 
 def test_backtest_smoke(tmp_path):
-    idx = pd.date_range("2024-01-01", periods=24 * 120, freq="H", tz="UTC")
+    idx = pd.date_range("2024-01-01", periods=24 * 300, freq="h", tz="UTC")
     base = pd.Series(range(len(idx)), index=idx, dtype=float) + 30_000
     df = pd.DataFrame(index=idx)
     df["open"] = base

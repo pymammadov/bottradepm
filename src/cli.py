@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 
-from src.backtest import run_backtest
-from src.data_loader import load_ohlcv_csv
+from .backtest import run_backtest
+from .data_loader import load_ohlcv_csv
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ from src.indicators import adx, atr, ema, rsi
 
 
 def test_indicator_sanity():
-    idx = pd.date_range("2024-01-01", periods=300, freq="H", tz="UTC")
+    idx = pd.date_range("2024-01-01", periods=300, freq="h", tz="UTC")
     close = pd.Series(np.linspace(100, 130, 300), index=idx)
     df = pd.DataFrame(
         {

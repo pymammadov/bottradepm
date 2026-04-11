@@ -14,7 +14,7 @@ def max_drawdown_pct(equity_curve: pd.Series) -> float:
 
 
 def average_monthly_return_pct(equity_df: pd.DataFrame) -> float:
-    monthly = equity_df.resample("M").last()["equity"]
+    monthly = equity_df.resample("ME").last()["equity"]
     if len(monthly) < 2:
         return float("nan")
     returns = monthly.pct_change().dropna()
@@ -32,10 +32,14 @@ def summarize_report(
     data_source: str,
 ) -> dict[str, Any]:
     total_return_pct = ((ending_equity / starting_equity) - 1) * 100
-    closed = trades[trades["event_type"].isin(["stop", "tp1", "tp2", "tp3", "force_close"])]
-    total_trades = int((trades["event_type"] == "entry").sum())
+    if trades.empty or "event_type" not in trades.columns:
+        closed = pd.DataFrame()
+        total_trades = 0
+    else:
+        closed = trades[trades["event_type"].isin(["stop", "tp1", "tp2", "tp3", "force_close"])]
+        total_trades = int((trades["event_type"] == "entry").sum())
 
-    trade_pnls = closed["realized_pnl"].dropna()
+    trade_pnls = closed["realized_pnl"].dropna() if not closed.empty else pd.Series(dtype=float)
     wins = trade_pnls[trade_pnls > 0]
     losses = trade_pnls[trade_pnls < 0]
     win_rate = (len(wins) / len(trade_pnls) * 100) if len(trade_pnls) else math.nan
@@ -43,7 +47,7 @@ def summarize_report(
     avg_loss = float(losses.mean()) if len(losses) else 0.0
     profit_factor = float(wins.sum() / abs(losses.sum())) if len(losses) and abs(losses.sum()) > 0 else math.nan
     expectancy = float(trade_pnls.mean()) if len(trade_pnls) else 0.0
-    avg_r = float(closed["r_multiple"].dropna().mean()) if "r_multiple" in closed else 0.0
+    avg_r = float(closed["r_multiple"].dropna().mean()) if not closed.empty and "r_multiple" in closed else 0.0
 
     return {
         "starting_equity": starting_equity,
