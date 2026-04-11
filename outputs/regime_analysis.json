@@ -1,0 +1,28 @@
+{
+  "assumptions": {
+    "bull": "close > d_ema200 and adx > threshold",
+    "bear": "close < d_ema200 and adx > threshold",
+    "high_vol": "rolling 20 period volatility above configured quantile"
+  },
+  "best_config": {
+    "risk_pct": 0.012,
+    "stop_atr_mult": 1.5,
+    "adx_threshold": 20.0,
+    "breakout_lookback": 30,
+    "pullback_rsi_min": 44.0,
+    "pullback_rsi_max": 64.0,
+    "trailing_atr_mult": 0.8,
+    "tp1_r": 1.0,
+    "tp2_r": 2.2,
+    "tp3_r": 4.2,
+    "entry_mode": "combined",
+    "breakout_volume_mult": 1.2,
+    "breakout_close_buffer_atr": 0.0,
+    "reentry_cooldown_bars": 1,
+    "tp1_size": 0.45,
+    "tp2_size": 0.25,
+    "move_stop_to_breakeven_after_tp1": false,
+    "use_monthly_controls": false,
+    "use_regime_filter": false
+  }
+}

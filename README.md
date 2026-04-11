@@ -66,10 +66,10 @@ CSV format expected:
 
 `timestamp,open,high,low,close,volume`
 
-## Run backtest
+## Run baseline backtest
 
 ```bash
-python scripts/run_backtest.py --csv data/btcusdt_1h.csv
+python -m src.cli backtest --csv data/btcusdt_1h.csv
 ```
 
 Outputs:
@@ -81,7 +81,7 @@ Outputs:
 ## Run optimization sweep (train/validation)
 
 ```bash
-python scripts/run_optimization.py --csv data/btcusdt_1h.csv --train-ratio 0.7
+python -m src.cli optimize --csv data/btcusdt_1h.csv --train-ratio 0.7
 ```
 
 The optimization performs a grid search across key strategy parameters:
@@ -101,6 +101,22 @@ Optimization outputs:
 - `outputs/best_model_report.json`
 
 Parameters are ranked by a balanced score considering monthly returns, drawdown, profit factor, and trade count.
+
+## Run institutional workflow (baseline + strategy_v2 + optimization + OOS + stress)
+
+```bash
+python -m src.cli institutional --csv data/btcusdt_1h.csv --output-dir outputs
+```
+
+This command generates fund-style research artifacts:
+- `outputs/report.json`
+- `outputs/optimization_results.csv`
+- `outputs/optimization_summary.json`
+- `outputs/best_model_report.json`
+- `outputs/stress_test_summary.json`
+- `outputs/oos_comparison.json`
+- `outputs/regime_analysis.json`
+- `outputs/improvement_log.md`
 
 ## Report fields
 
