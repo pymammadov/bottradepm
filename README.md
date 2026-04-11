@@ -107,6 +107,22 @@ Optimization outputs:
 - number of forced closes
 - data source tag (public CSV vs synthetic)
 
+
+## Troubleshooting: `ModuleNotFoundError: No module named data_loader`
+
+If you see this during `pytest`, it means one of the `src/*.py` files used a non-package import like `from data_loader import ...`.
+Use package-qualified imports instead:
+
+```python
+from src.data_loader import ...
+```
+
+Then run tests from the repository root:
+
+```bash
+python -m pytest -q
+```
+
 ## Tests
 
 ```bash
