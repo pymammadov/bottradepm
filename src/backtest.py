@@ -14,8 +14,10 @@ from .strategy import (
     StrategyConfig,
     add_features,
     compute_position_size,
+    is_breakdown_entry,
     is_breakout_entry,
     is_pullback_entry,
+    is_short_pullback_entry,
 )
 
 
@@ -92,18 +94,20 @@ def run_backtest(
                     monthly.entries_disabled = True
 
         if position is not None:
-            stop_hit = row["low"] <= position.stop_price
-            tp1_hit = (not position.tp1_done) and row["high"] >= position.tp1_price
-            tp2_hit = (not position.tp2_done) and row["high"] >= position.tp2_price
-            tp3_hit = (not position.tp3_done) and row["high"] >= position.tp3_price
+            is_long = position.side == 1
+            stop_hit = row["low"] <= position.stop_price if is_long else row["high"] >= position.stop_price
+            tp1_hit = (not position.tp1_done) and (row["high"] >= position.tp1_price if is_long else row["low"] <= position.tp1_price)
+            tp2_hit = (not position.tp2_done) and (row["high"] >= position.tp2_price if is_long else row["low"] <= position.tp2_price)
+            tp3_hit = (not position.tp3_done) and (row["high"] >= position.tp3_price if is_long else row["low"] <= position.tp3_price)
 
             if stop_hit:
                 qty = position.remaining_qty
                 fill = _exit_fill(position.stop_price, cfg.slippage_rate)
-                pnl = (fill - position.entry_price) * qty
+                pnl = (fill - position.entry_price) * qty * position.side
                 fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
                 equity += pnl - fee
-                r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
+                risk_per_unit = abs(position.entry_price - position.initial_stop)
+                r_mult = ((fill - position.entry_price) * position.side) / risk_per_unit
                 trades.append({
                     "timestamp": ts,
                     "event_type": "stop",
@@ -119,36 +123,39 @@ def run_backtest(
                 if tp1_hit:
                     qty = min(position.remaining_qty, position.qty * cfg.tp1_size)
                     fill = _exit_fill(position.tp1_price, cfg.slippage_rate)
-                    pnl = (fill - position.entry_price) * qty
+                    pnl = (fill - position.entry_price) * qty * position.side
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
                     equity += pnl - fee
                     position.remaining_qty -= qty
                     position.tp1_done = True
                     if cfg.move_stop_to_breakeven_after_tp1:
                         position.stop_price = position.entry_price
-                    r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
+                    risk_per_unit = abs(position.entry_price - position.initial_stop)
+                    r_mult = ((fill - position.entry_price) * position.side) / risk_per_unit
                     trades.append({"timestamp": ts, "event_type": "tp1", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
 
                 if tp2_hit and position is not None:
                     qty = min(position.remaining_qty, position.qty * cfg.tp2_size)
                     fill = _exit_fill(position.tp2_price, cfg.slippage_rate)
-                    pnl = (fill - position.entry_price) * qty
+                    pnl = (fill - position.entry_price) * qty * position.side
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
                     equity += pnl - fee
                     position.remaining_qty -= qty
                     position.tp2_done = True
-                    trail = row["ema20"] - cfg.trailing_atr_mult * row["atr14"]
-                    position.stop_price = max(position.stop_price, trail)
-                    r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
+                    trail = row["ema20"] - cfg.trailing_atr_mult * row["atr14"] if is_long else row["ema20"] + cfg.trailing_atr_mult * row["atr14"]
+                    position.stop_price = max(position.stop_price, trail) if is_long else min(position.stop_price, trail)
+                    risk_per_unit = abs(position.entry_price - position.initial_stop)
+                    r_mult = ((fill - position.entry_price) * position.side) / risk_per_unit
                     trades.append({"timestamp": ts, "event_type": "tp2", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
 
                 if tp3_hit and position is not None:
                     qty = position.remaining_qty
                     fill = _exit_fill(position.tp3_price, cfg.slippage_rate)
-                    pnl = (fill - position.entry_price) * qty
+                    pnl = (fill - position.entry_price) * qty * position.side
                     fee = (position.entry_price * qty + fill * qty) * cfg.fee_rate
                     equity += pnl - fee
-                    r_mult = (fill - position.entry_price) / (position.entry_price - position.initial_stop)
+                    risk_per_unit = abs(position.entry_price - position.initial_stop)
+                    r_mult = ((fill - position.entry_price) * position.side) / risk_per_unit
                     trades.append({"timestamp": ts, "event_type": "tp3", "price": fill, "qty": qty, "realized_pnl": pnl - fee, "equity": equity, "r_multiple": r_mult})
                     position = None
                     cooldown_bars = cfg.reentry_cooldown_bars
@@ -164,6 +171,20 @@ def run_backtest(
                 or (cfg.entry_mode == "breakout" and breakout_signal)
                 or (cfg.entry_mode == "pullback" and pullback_signal)
             )
+            side = 1
+            if cfg.enable_short:
+                short_breakdown = is_breakdown_entry(row, cfg)
+                short_pullback = is_short_pullback_entry(row, cfg)
+                short_ok = (
+                    (cfg.short_entry_mode == "combined" and (short_breakdown or short_pullback))
+                    or (cfg.short_entry_mode == "breakdown" and short_breakdown)
+                    or (cfg.short_entry_mode == "pullback" and short_pullback)
+                )
+                if short_ok and not should_enter:
+                    should_enter = True
+                    side = -1
+                elif short_ok and should_enter and bool(row.get("high_vol_regime", False)):
+                    side = -1
             if should_enter:
                 entry_price = _entry_fill(row["close"], cfg.slippage_rate)
                 stop_dist = cfg.stop_atr_mult * row["atr14"]
@@ -176,7 +197,7 @@ def run_backtest(
                     size_multiplier=monthly.size_multiplier,
                 )
                 if qty > 0:
-                    stop_price = entry_price - stop_dist
+                    stop_price = entry_price - stop_dist if side == 1 else entry_price + stop_dist
                     fee = entry_price * qty * cfg.fee_rate
                     equity -= fee
                     position = Position(
@@ -186,9 +207,10 @@ def run_backtest(
                         remaining_qty=qty,
                         stop_price=stop_price,
                         initial_stop=stop_price,
-                        tp1_price=entry_price + cfg.tp1_r * stop_dist,
-                        tp2_price=entry_price + cfg.tp2_r * stop_dist,
-                        tp3_price=entry_price + cfg.tp3_r * stop_dist,
+                        tp1_price=entry_price + side * cfg.tp1_r * stop_dist,
+                        tp2_price=entry_price + side * cfg.tp2_r * stop_dist,
+                        tp3_price=entry_price + side * cfg.tp3_r * stop_dist,
+                        side=side,
                     )
                     trades.append({
                         "timestamp": ts,
@@ -199,21 +221,23 @@ def run_backtest(
                         "equity": equity,
                         "r_multiple": None,
                         "size_multiplier": monthly.size_multiplier,
+                        "side": side,
                     })
 
         mark_to_market = equity
         if position is not None:
-            mark_to_market += position.remaining_qty * (row["close"] - position.entry_price)
+            mark_to_market += position.remaining_qty * (row["close"] - position.entry_price) * position.side
         curve.append({"timestamp": ts, "equity": mark_to_market})
 
     if position is not None:
         final_ts = df.index[-1]
         final_price = _exit_fill(df.iloc[-1]["close"], cfg.slippage_rate)
         qty = position.remaining_qty
-        pnl = (final_price - position.entry_price) * qty
+        pnl = (final_price - position.entry_price) * qty * position.side
         fee = (position.entry_price * qty + final_price * qty) * cfg.fee_rate
         equity += pnl - fee
-        r_mult = (final_price - position.entry_price) / (position.entry_price - position.initial_stop)
+        risk_per_unit = abs(position.entry_price - position.initial_stop)
+        r_mult = ((final_price - position.entry_price) * position.side) / risk_per_unit
         trades.append({
             "timestamp": final_ts,
             "event_type": "force_close",

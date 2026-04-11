@@ -146,7 +146,7 @@ def _config_grid() -> list[dict]:
                 "use_regime_filter": use_regime_filter,
             }
         )
-    max_grid_size = 320
+    max_grid_size = 60
     if len(rows) <= max_grid_size:
         return rows
     rng = random.Random(42)

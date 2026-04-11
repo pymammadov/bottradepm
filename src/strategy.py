@@ -35,6 +35,9 @@ class StrategyConfig:
     scale_up_threshold: float = 0.08  # Scale up position size at 8%
     scale_down_threshold: float = 0.12  # Scale down at 12%
     loss_stop_threshold: float = -0.04  # Stop entries at -4% monthly loss
+    enable_short: bool = False
+    short_entry_mode: str = "breakdown"  # breakdown|pullback|combined
+    volatility_filter_quantile: float = 0.6
 
 
 @dataclass
@@ -48,6 +51,7 @@ class Position:
     tp1_price: float
     tp2_price: float
     tp3_price: float
+    side: int = 1  # +1 long, -1 short
     tp1_done: bool = False
     tp2_done: bool = False
     tp3_done: bool = False
@@ -70,6 +74,9 @@ def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyCo
     out["ema50"] = ema(out["close"], 50)
     out["atr14"] = atr(out, 14)
     out["rsi14"] = rsi(out["close"], 14)
+    out["ret_1"] = out["close"].pct_change()
+    out["volatility_20"] = out["ret_1"].rolling(20).std()
+    out["price_zscore_20"] = (out["close"] - out["close"].rolling(20).mean()) / out["close"].rolling(20).std()
     out["prior_lookback_high"] = out["high"].rolling(cfg.breakout_lookback).max().shift(1)
     out["vol_ma20"] = out["volume"].rolling(20).mean()
 
@@ -93,6 +100,9 @@ def add_features(df_4h: pd.DataFrame, df_daily: pd.DataFrame, config: StrategyCo
     out["d_ema200"] = out["d_ema200"].fillna(out["d_ema50"])
     out["d_adx14"] = out["d_adx14"].fillna(0.0)
     out["daily_regime"] = out["daily_regime"].astype("boolean").fillna(False).astype(bool)
+    out["daily_bear_regime"] = ((out["close"] < out["d_ema200"]) & (out["d_adx14"] > cfg.adx_threshold)).fillna(False)
+    vol_thresh = out["volatility_20"].quantile(cfg.volatility_filter_quantile)
+    out["high_vol_regime"] = (out["volatility_20"] >= vol_thresh).fillna(False)
     return out
 
 
@@ -129,3 +139,24 @@ def is_pullback_entry(row: pd.Series, config: StrategyConfig | None = None) -> b
     bullish = row["close"] > row["open"]
     rsi_ok = cfg.pullback_rsi_min <= row["rsi14"] <= cfg.pullback_rsi_max
     return bool(regime_ok and touch_ema and bullish and rsi_ok and row["close"] > row["ema50"])
+
+
+def is_breakdown_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
+    cfg = config or StrategyConfig()
+    regime_ok = cfg.enable_short and bool(row.get("daily_bear_regime", False))
+    return bool(
+        regime_ok
+        and row["close"] < row["prior_lookback_high"] * 0.96
+        and row["close"] < row["ema20"]
+        and row["close"] < row["ema50"]
+        and row["volume"] > cfg.breakout_volume_mult * row["vol_ma20"]
+    )
+
+
+def is_short_pullback_entry(row: pd.Series, config: StrategyConfig | None = None) -> bool:
+    cfg = config or StrategyConfig()
+    regime_ok = cfg.enable_short and bool(row.get("daily_bear_regime", False))
+    touch_ema = (row["high"] >= row["ema20"] >= row["close"]) or (row["high"] >= row["ema50"] >= row["close"])
+    bearish = row["close"] < row["open"]
+    rsi_ok = (100 - cfg.pullback_rsi_max) <= row["rsi14"] <= (100 - cfg.pullback_rsi_min)
+    return bool(regime_ok and touch_ema and bearish and rsi_ok and row["close"] < row["ema50"])
